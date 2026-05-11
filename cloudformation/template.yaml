@@ -23,7 +23,7 @@ Parameters:
     Description: WordPress admin panel password
   GitHubRepo:
     Type: String
-    Default: https://github.com/CHANGE/ME/
+    Default: https://github.com/Vafth/tech-shop/
     Description: Public GitHub repo URL with theme/ and plugins/ folders
  
 Resources:
@@ -527,6 +527,3 @@ Outputs:
   ShopURL:
     Description: Product listing page
     Value: !Sub http://${ApplicationLoadBalancer.DNSName}/shop
-  RDSEndpoint:
-    Description: RDS endpoint
-    Value: !GetAtt DBInstance.Endpoint.Address
