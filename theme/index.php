@@ -1,0 +1,1 @@
+<?php get_header(); the_loop(); get_footer(); ?>

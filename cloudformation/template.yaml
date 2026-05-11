@@ -1,0 +1,532 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: TechShop main template
+
+Parameters:
+  StackName:
+    Type: String
+    Default: TechShop
+  DBName:
+    Type: String
+    Default: wordpress_db
+  DBUsername:
+    Type: String
+    Default: wp_admin
+  DBPassword:
+    Type: String
+    Default: CHANGE_ME
+    NoEcho: true
+    Description: RDS password
+  AdminPassword:
+    Type: String
+    Default: CHANGE_ME
+    NoEcho: true
+    Description: WordPress admin panel password
+  GitHubRepo:
+    Type: String
+    Default: https://github.com/CHANGE/ME/
+    Description: Public GitHub repo URL with theme/ and plugins/ folders
+ 
+Resources:
+ 
+# ── VPC & NETWORKING ──────────────────────────────────────────────────────────
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Ref StackName
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Podsieci Publiczne (dla ALB i NAT)
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      MapPublicIpOnLaunch: true
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [ 1, !GetAZs '' ]
+      MapPublicIpOnLaunch: true
+
+  # Podsieci Prywatne APP (dla EC2)
+  PrivateAppSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.10.0/24
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+  PrivateAppSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.11.0/24
+      AvailabilityZone: !Select [ 1, !GetAZs '' ]
+
+  # Podsieci Prywatne DB (dla RDS)
+  PrivateDBSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.20.0/24
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+  PrivateDBSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.21.0/24
+      AvailabilityZone: !Select [ 1, !GetAZs '' ]
+
+  # NAT Gateways i EIPs
+  NatEipA:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+  NatGatewayA:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEipA.AllocationId
+      SubnetId: !Ref PublicSubnetA
+  NatEipB:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+  NatGatewayB:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEipB.AllocationId
+      SubnetId: !Ref PublicSubnetB
+
+  # Tabele routingu
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+  PublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+  PubSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+  PubSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateRouteTableA:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+  PrivateRouteA:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableA
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGatewayA
+  PrivAppSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateAppSubnetA
+      RouteTableId: !Ref PrivateRouteTableA
+
+  PrivateRouteTableB:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+  PrivateRouteB:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableB
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGatewayB
+  PrivAppSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateAppSubnetB
+      RouteTableId: !Ref PrivateRouteTableB
+
+
+# ── SECURITY GROUPS ───────────────────────────────────────────────────────────
+  ALBSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable HTTP from Internet
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  EC2SG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable HTTP from ALB
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !GetAtt ALBSG.GroupId
+
+  RDSSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable MySQL from EC2
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !GetAtt EC2SG.GroupId
+
+  EFSSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable NFS from EC2
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          SourceSecurityGroupId: !GetAtt EC2SG.GroupId
+
+# ── RDS ───────────────────────────────────────────────────────────────────────
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group for RDS
+      SubnetIds:
+        - !Ref PrivateDBSubnetA
+        - !Ref PrivateDBSubnetB
+
+  DBInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      Engine: mysql
+      DBInstanceClass: db.t3.micro
+      AllocatedStorage: '20'
+      DBName: !Ref DBName
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      MultiAZ: true
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !GetAtt RDSSG.GroupId
+      PubliclyAccessible: false
+
+
+# ── EFS ───────────────────────────────────────────────────────────────────────
+  FileSystem:
+    Type: AWS::EFS::FileSystem
+    DeletionPolicy: Retain
+    Properties:
+      PerformanceMode: generalPurpose
+
+  MountTargetA:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref FileSystem
+      SubnetId: !Ref PrivateAppSubnetA
+      SecurityGroups:
+        - !GetAtt EFSSG.GroupId
+
+  MountTargetB:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref FileSystem
+      SubnetId: !Ref PrivateAppSubnetB
+      SecurityGroups:
+        - !GetAtt EFSSG.GroupId
+
+
+# ── ALB ───────────────────────────────────────────────────────────────────────
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      Subnets:
+        - !Ref PublicSubnetA
+        - !Ref PublicSubnetB
+      SecurityGroups:
+        - !GetAtt ALBSG.GroupId
+
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VPC
+      Port: 80
+      Protocol: HTTP
+      HealthCheckPath: /
+      Matcher:
+        HttpCode: 200-302
+      TargetType: instance
+      TargetGroupAttributes:
+        - Key: stickiness.enabled
+          Value: 'true'
+        - Key: stickiness.type
+          Value: lb_cookie
+        - Key: stickiness.lb_cookie.duration_seconds
+          Value: '86400'
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+
+
+# ── INIT INSTANCE ─────────────────────────────────────────────────────────────
+  InitInstance:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - DBInstance
+      - MountTargetA
+      - MountTargetB
+      - ApplicationLoadBalancer
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT20M
+    Properties:
+      ImageId: resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+      InstanceType: t3.micro
+      IamInstanceProfile: LabInstanceProfile
+      SubnetId: !Ref PrivateAppSubnetA
+      SecurityGroupIds:
+        - !GetAtt EC2SG.GroupId
+      UserData: !Base64
+        Fn::Sub: |
+          #!/bin/bash
+          set -e
+          set -x
+          # trap '/opt/aws/bin/cfn-signal -e 1 --stack ${AWS::StackName} --resource InitInstance --region ${AWS::Region}' ERR
+
+          dnf update -y
+          dnf install -y httpd wget php-fpm php-mysqli php-json php php-devel amazon-efs-utils git
+ 
+          # ── Install WordPress core ──
+          cd /tmp
+          wget https://wordpress.org/latest.tar.gz
+          tar -xzf latest.tar.gz
+          sudo cp -r wordpress/* /var/www/html/
+ 
+          # ── Mount EFS ──
+          sudo mkdir -p /var/www/html/wp-content
+          sudo mount -t efs -o tls ${FileSystem}:/ /var/www/html/wp-content
+          sudo echo "${FileSystem}:/ /var/www/html/wp-content efs _netdev,tls 0 0" >> /etc/fstab
+ 
+          # ── Seed default wp-content if EFS is empty ──
+          if [ -z "$(ls -A /var/www/html/wp-content)" ]; then
+            sudo cp -r /tmp/wordpress/wp-content/* /var/www/html/wp-content/
+          fi
+ 
+          # ── Install WP-CLI ──
+          sudo curl -sO https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+          sudo chmod +x wp-cli.phar
+          sudo mv wp-cli.phar /usr/local/bin/wp
+ 
+          # ── Clone repo from GitHub ──
+          sudo git clone ${GitHubRepo} /tmp/techshop
+          
+          cp /tmp/techshop/.htaccess /var/www/html/wp-content/.htaccess
+          
+          # ── Copy theme to EFS ──
+          sudo mkdir -p /var/www/html/wp-content/themes/techshop
+          sudo cp -r /tmp/techshop/theme/* /var/www/html/wp-content/themes/techshop/
+ 
+          # ── Copy plugin to EFS ──
+          sudo mkdir -p /var/www/html/wp-content/plugins/ecommerce-setup
+          sudo cp /tmp/techshop/plugins/setup-plugin.php \
+             /var/www/html/wp-content/plugins/ecommerce-setup/ecommerce-setup.php
+ 
+          # ── Permissions ──
+          sudo chown -R apache:apache /var/www/html/
+ 
+          # ── Create wp-config.php ──
+          sudo wp config create \
+            --dbname=${DBName} \
+            --dbuser=${DBUsername} \
+            --dbpass=${DBPassword} \
+            --dbhost=${DBInstance.Endpoint.Address} \
+            --path=/var/www/html \
+            --allow-root
+ 
+          # ── Install WordPress (creates DB tables + admin user) ──
+          sudo wp core install \
+            --url="http://${ApplicationLoadBalancer.DNSName}" \
+            --title="TechShop" \
+            --admin_user="admin" \
+            --admin_password=${AdminPassword} \
+            --admin_email="admin@test.com" \
+            --path=/var/www/html \
+            --allow-root
+ 
+          # ── Move wp-config to EFS and symlink ──
+          sudo mv /var/www/html/wp-config.php /var/www/html/wp-content/wp-config.php
+          sudo ln -sf /var/www/html/wp-content/wp-config.php /var/www/html/wp-config.php
+ 
+          # ── Activate theme ──
+          sudo wp theme activate techshop \
+            --path=/var/www/html --allow-root
+ 
+          # ── Activate plugin (seeds products into RDS) ──
+          sudo wp plugin activate ecommerce-setup \
+            --path=/var/www/html --allow-root
+ 
+          # ── Set permalink structure ──
+          sudo wp rewrite structure '/%postname%/' \
+            --path=/var/www/html --allow-root
+          sudo wp rewrite flush \
+            --path=/var/www/html --allow-root
+ 
+          # ── Create pages ──
+          sudo wp post create \
+            --post_type=page --post_title="Shop" --post_name="shop" \
+            --post_status=publish --page_template="template-shop.php" \
+            --path=/var/www/html --allow-root
+ 
+          sudo wp post create \
+            --post_type=page --post_title="Login" --post_name="login" \
+            --post_status=publish --page_template="template-login.php" \
+            --path=/var/www/html --allow-root
+ 
+          sudo wp post create \
+            --post_type=page --post_title="Product" --post_name="product" \
+            --post_status=publish --page_template="template-product.php" \
+            --path=/var/www/html --allow-root
+ 
+          sudo wp post create \
+            --post_type=page --post_title="Favorites" --post_name="favorites" \
+            --post_status=publish --page_template="template-favorites.php" \
+            --path=/var/www/html --allow-root
+
+          sudo wp option update default_role subscriber \
+            --path=/var/www/html --allow-root
+ 
+          sudo wp option update site_icon 0 --path=/var/www/html --allow-root
+
+          # ── Signal CloudFormation: init complete ──
+          /opt/aws/bin/cfn-signal -e 0 \
+            --stack ${AWS::StackName} \
+            --resource InitInstance \
+            --region ${AWS::Region}
+ 
+          # ── Self-terminate ──
+          
+          TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
+          -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
+          
+          INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
+          http://169.254.169.254/latest/meta-data/instance-id)
+          
+          # aws ec2 terminate-instances --instance-ids $INSTANCE_ID --region ${AWS::Region}
+ 
+
+# ── LAUNCH TEMPLATE + ASG ─────────────────────────────────────────────────────
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+        InstanceType: t3.micro
+        IamInstanceProfile:
+          Name: LabInstanceProfile
+        SecurityGroupIds:
+          - !GetAtt EC2SG.GroupId
+        UserData: !Base64
+          Fn::Sub: |
+            #!/bin/bash
+            dnf update -y
+            dnf install -y httpd php-fpm php-mysqli php-json php php-devel amazon-efs-utils
+ 
+            # Copy WordPress core
+            cd /tmp
+            wget https://wordpress.org/latest.tar.gz
+            tar -xzf latest.tar.gz
+            cp -r wordpress/* /var/www/html/
+ 
+            # Mount EFS (wp-content already populated by init instance)
+            mkdir -p /var/www/html/wp-content
+            for i in {1..12}; do
+              mount -t efs -o tls ${FileSystem}:/ /var/www/html/wp-content && break
+              echo "EFS mount attempt $i failed, retrying in 10s..."
+              sleep 10
+            done
+            echo "${FileSystem}:/ /var/www/html/wp-content efs _netdev,tls 0 0" >> /etc/fstab
+
+            # Symlink wp-config from EFS
+            ln -sf /var/www/html/wp-content/wp-config.php /var/www/html/wp-config.php
+            
+            # Symlink .htaccess from EFS
+            ln -sf /var/www/html/wp-content/.htaccess /var/www/html/.htaccess
+            
+            # Enable mod_rewrite
+            sed -i 's/AllowOverride None/AllowOverride All/g' /etc/httpd/conf/httpd.conf
+  
+            chown -R apache:apache /var/www/html/
+            systemctl enable httpd
+            systemctl start httpd
+
+
+# ── AUTO SCALING ──────────────────────────────────────────────────────────────
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn:
+      - InitInstance
+    Properties:
+      VPCZoneIdentifier:
+        - !Ref PrivateAppSubnetA
+        - !Ref PrivateAppSubnetB
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      MinSize: '2'
+      MaxSize: '4'
+      DesiredCapacity: '2'
+      TargetGroupARNs:
+        - !Ref ALBTargetGroup
+
+  ScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 50
+
+Outputs:
+  WebsiteURL:
+    Description: TechShop URL
+    Value: !Sub http://${ApplicationLoadBalancer.DNSName}
+  ShopURL:
+    Description: Product listing page
+    Value: !Sub http://${ApplicationLoadBalancer.DNSName}/shop
+  RDSEndpoint:
+    Description: RDS endpoint
+    Value: !GetAtt DBInstance.Endpoint.Address
