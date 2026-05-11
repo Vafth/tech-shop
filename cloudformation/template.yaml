@@ -27,7 +27,6 @@ Parameters:
     Description: Public GitHub repo URL with theme/ and plugins/ folders
  
 Resources:
- 
 # ── VPC & NETWORKING ──────────────────────────────────────────────────────────
   VPC:
     Type: AWS::EC2::VPC
@@ -211,6 +210,7 @@ Resources:
           ToPort: 2049
           SourceSecurityGroupId: !GetAtt EC2SG.GroupId
 
+
 # ── RDS ───────────────────────────────────────────────────────────────────────
   DBSubnetGroup:
     Type: AWS::RDS::DBSubnetGroup
@@ -322,9 +322,7 @@ Resources:
         Fn::Sub: |
           #!/bin/bash
           set -e
-          set -x
-          # trap '/opt/aws/bin/cfn-signal -e 1 --stack ${AWS::StackName} --resource InitInstance --region ${AWS::Region}' ERR
-
+          
           dnf update -y
           dnf install -y httpd wget php-fpm php-mysqli php-json php php-devel amazon-efs-utils git
  
@@ -443,7 +441,7 @@ Resources:
           INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
           http://169.254.169.254/latest/meta-data/instance-id)
           
-          # aws ec2 terminate-instances --instance-ids $INSTANCE_ID --region ${AWS::Region}
+          aws ec2 terminate-instances --instance-ids $INSTANCE_ID --region ${AWS::Region}
  
 
 # ── LAUNCH TEMPLATE + ASG ─────────────────────────────────────────────────────
@@ -520,6 +518,8 @@ Resources:
           PredefinedMetricType: ASGAverageCPUUtilization
         TargetValue: 50
 
+
+# ── Outputs ───────────────────────────────────────────────────────────────────
 Outputs:
   WebsiteURL:
     Description: TechShop URL
